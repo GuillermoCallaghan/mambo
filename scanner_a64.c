@@ -966,6 +966,41 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
         break;
 
       case A64_SVC:
+#ifdef REDUCED_SYSCALLS
+      {
+        #include <asm/unistd.h>
+        uint32_t *my_write_p = write_p;
+        bool install_syscall_handler = false;
+        int syscall_number;
+        while ((start_address <= my_write_p) && (install_syscall_handler == false)) {
+
+          a64_instruction instruction_p = a64_decode(my_write_p);
+
+          if ((instruction_p == A64_MOV_WIDE) && ((*my_write_p & 0x1F) == 8)) {
+            syscall_number = (*my_write_p >> 5) & 0xFFFF;
+            switch (syscall_number) {
+            case __NR_brk:
+            case __NR_clone:
+            case __NR_exit:
+            case __NR_rt_sigaction:
+            case __NR_exit_group:
+            case __NR_close:
+            case __NR_readlinkat:
+            case __NR_mmap:
+            case __NR_mprotect:
+            case __NR_munmap:
+            case __NR_rt_sigreturn:
+              install_syscall_handler = true;
+              break;
+            }
+          }
+          my_write_p--;
+        }
+        if (install_syscall_handler == false) {
+          a64_copy();
+          break;
+        }
+#endif
         a64_push_pair_reg(x29, x30);
         uint64_t const LR = (uint64_t)read_address + 4;
         generate_address(&write_p, x29, LR);
@@ -981,7 +1016,9 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
                                 &write_p, &data_p, basic_block, type, true, &stop);
         read_address--;
         break;
-
+#ifdef REDUCED_SYSCALLS
+      }
+#endif
       case A64_MRS_MSR_REG:
         /*
          * The R variable defines if the instruction is MSR (R = 0) or
