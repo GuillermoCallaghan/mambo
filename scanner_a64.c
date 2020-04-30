@@ -66,6 +66,8 @@
 
 #define a64_brk() *(write_p++) = 0xD4200000;
 
+#define A64_INSTRUCTION 4
+
 void generate_address(uint32_t **o_write_p, enum reg const reg, uint64_t const label) {
   int64_t const four_GB = 4UL * 1024UL * 1024UL * 1024UL;
   int64_t const one_MB = 1024UL * 1024UL;
@@ -102,6 +104,41 @@ void generate_address(uint32_t **o_write_p, enum reg const reg, uint64_t const l
   }
   *o_write_p = write_p;
 }
+
+#if defined(DBM_TRACES) && defined(RAIBI)
+uint64_t allocate_aibi_slot(dbm_thread *thread_data, uint32_t **o_write_p) {
+  uint32_t *write_p = *o_write_p;
+  uintptr_t const alignment = 0x3F;
+
+  // assing a new cache line to aibi_cache
+  if (thread_data->aibi_cache == NULL) {
+    // align to next cache line
+    uintptr_t const new_cache_line = (uintptr_t)write_p + alignment & ~alignment;
+
+    thread_data->aibi_cache = (uint64_t *)new_cache_line;
+
+    write_p = (uint32_t *)thread_data->aibi_cache;
+    write_p += 16;
+  }
+
+  uint64_t aibi_slot = (uint64_t)thread_data->aibi_cache;
+
+  // if this is the third SPC-TPC slot
+  if (((uint64_t)thread_data->aibi_cache & alignment) == 48) {
+    thread_data->aibi_cache = NULL;
+  } else {
+    thread_data->aibi_cache += 2;
+  }
+
+  // initialise SPC-TPC slots
+  uintptr_t *clr = (uintptr_t *) aibi_slot;
+  clr[0] = 0;
+  clr[1] = 0;
+
+  *o_write_p = write_p;
+  return aibi_slot;
+}
+#endif
 
 void a64_branch_helper(uint32_t *write_p, uint64_t target, bool link) {
   int64_t difference = target - (uint64_t)write_p;
@@ -501,37 +538,48 @@ bool a64_scanner_deliver_callbacks(dbm_thread *thread_data, mambo_cb_idx cb_id, 
 void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t **o_write_p,
                             uint32_t *read_address, enum reg rn, bool link, bool set_meta) {
   /*
-   * Indirect Branch LookUp
-   * ======== ====== ======
+   *                       push  x0, x1, [sp, #-16]!
+   *                       push  x2, [sp, #-16]!                 ***
+   *                       mov   x1, rn                          ***
+   *                       adrp  lr, #:pg_hi21:spc               ###
+   *                       add   lr, lr, #:lo12:spc + 4          ###
+   * #if defined(DBM_TRACES) && defined(RAIBI)
+   *                       adr   reg_tmp, #aibi_slot
+   *                       ldp   x0, reg_tmp, [reg_tmp]
+   *                       sub   reg_tmp, reg_tmp, x1
+   *                       cbnz  reg_tmp, #ihlu
+   *                       pop   reg_tmp, [sp], #16              ###
+   *                       br    x0
+   * #endif
+   *     ihlu:             adrp  x0, #hash_table
+   *                       and   reg_tmp, x1, #hash_mask
+   *                       add   x0, x0, reg_tmp, lsl #2
+   *     loop:             ldr   reg_tmp, [x0], #16
+   *                       cbz   reg_tmp, go_to_dispatcher
+   *                       sub   reg_tmp, reg_tmp, x1
+   *                       cbnz  reg_tmp, #loop
+   *                       ldur  x0, [x0, #-8]
+   * #if defined(DBM_TRACES) && defined(RAIBI)
+   *                       adr   reg_tmp, #trace_cache
+   *                       sub   reg_tmp, x0, reg_tmp
+   *                       tbnz  reg_tmp, #63, #branch
+   *                       adr   reg_tmp, #aibi_slot
+   *                       stp   x0, x1, [reg_tmp]
+   * #endif
+   *     branch:           pop   x2, [sp], #16                   ***
+   *                       br    x0
+   *     go_to_dispatcher: mov   x0, x1
+   *                       mov   x1, #basic_block
+   *                       pop   x2, [sp], #16                   ***
+   *                       b     #dispatcher
    *
-   *                 STP  X0, X1, [SP, #-16]!
-   *                 STP  X2, [SP, #-16]!        **
-   *                 MOV  X1, rn                 ** rn = X1
-   *                 MOV  LR, read_address + 4   ##
-   *                 ADR  X0, #hash_table
-   *                 AND  Xtmp, rn, #(hash_mask << 2)
-   *                 ADD  X0, X0, Xtmp, LSL #2
-   *          loop:
-   *                 LDR  Xtmp, [X0], #16
-   *                 CBZ  Xtmp, not_found
-   *                 SUB  Xtmp, Xtmp, rn
-   *                 CBNZ Xtmp, loop
-   *                 LDR  X0, [X0,  #-8]
-   *                 LDR  X2, [SP], #16           **
-   *                 BR   X0
-   *     not_found:
-   *                 MOV  X0, rn
-   *                 MOV  X1, #bb
-   *                 LDR  X2, [SP], #16           **
-   *                 B    dispatcher
-   *
-   * ** if rn is X0, X1 or (BLR LR)
-   * ## for BLR
+   * *** if rn is x0 or (blr lr)
+   * ### for blr
    */
 
   uint32_t *write_p = *o_write_p;
   uint32_t *loop;
-  uint32_t *branch_to_not_found;
+  uint32_t *go_to_dispatcher;
   uint32_t reg_spc, reg_tmp;
   bool use_x2 = false;
 
@@ -548,64 +596,161 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
     thread_data->code_cache_meta[basic_block].rn = reg_spc;
   }
 
+  // push x0, x1
   a64_push_pair_reg(x0, x1);
 
   if (use_x2) {
+    // push x2
     a64_push_reg(x2);
     if (rn != reg_spc) {
+      // mov reg_spc, rn
       a64_logical_reg(&write_p, 1, 1, 0, 0, rn, 0, xzr, reg_spc);
       write_p++;
     }
   }
 
   if (link) {
-    uint64_t const LR = (uint64_t)read_address + 4;
+    // adrp lr, #:pg_hi21:spc
+    // add  lr, lr, #:lo12:spc + 4
+    uint64_t const LR = (uint64_t)read_address + (1 * A64_INSTRUCTION);
     generate_address(&write_p, lr, LR);
   }
 
+#if defined(DBM_TRACES) && defined(RAIBI)
+  uint32_t *adr;
+
+  bool const is_trace = write_p > (uint32_t *)thread_data->code_cache->traces;
+
+  // if it is a trace
+  if (is_trace) {
+    // adr reg_temp, #aibi_slot
+    adr = write_p++;
+
+    // ldp reg_tmp, x0, [reg_tmp]
+    a64_LDP_STP(&write_p, 2, 0, 2, 1, 0, reg_tmp, reg_tmp, x0);
+    write_p++;
+
+    // sub reg_tmp, reg_tmp, reg_spc
+    a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, reg_spc, 0, reg_tmp, reg_tmp);
+    write_p++;
+
+    // cbnz reg_tmp, #ihlu
+    uint32_t *cbnz = write_p++;
+
+    if (use_x2) {
+      // pop x2
+      a64_pop_reg(x2);
+    }
+
+    // br x0
+    a64_BR(&write_p, x0);
+    write_p++;
+
+    // ihlu:
+    a64_cbnz_helper(cbnz, (uint64_t)write_p, 1, reg_tmp);
+  }
+#endif
+
+  // adrp x0, #hash_table
   generate_address(&write_p, x0, (uint64_t)&thread_data->entry_address.entries);
 
+  // and reg_tmp, reg_spc, #hash_mask
   a64_logical_immed(&write_p, 1, 0, 1, 62, 18, reg_spc, reg_tmp);
   write_p++;
 
+  // add x0, x0, reg_tmp, lsl 2
   a64_ADD_SUB_shift_reg(&write_p, 1, 0, 0, 0, reg_tmp, 0x2, x0, x0);
   write_p++;
 
+  // loop:
   loop = write_p;
+
+  // ldr x0, [reg_tmp], #16
   a64_LDR_STR_immed(&write_p, 3, 0, 1, 16, 1, x0, reg_tmp);
   write_p++;
 
-  branch_to_not_found = write_p++;
+  // cbz reg_tmp, #go_to_dispatcher
+  go_to_dispatcher = write_p++;
 
+  // sub reg_tmp, reg_tmp, reg_spc
   a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, reg_spc, 0, reg_tmp, reg_tmp);
   write_p++;
 
+  // cbz reg_tmp, #loop
   a64_cbnz_helper(write_p, (uint64_t)loop, 1, reg_tmp);
   write_p++;
 
+  // ldur    x0, [x0, #-8]
   a64_LDR_STR_immed(&write_p, 3, 0, 1, -8, 0, x0, x0);
   write_p++;
 
+#if defined(DBM_TRACES) && defined(RAIBI)
+  uint32_t *store_adr;
+
+  if (is_trace) {
+    // adr reg_tmp, #trace_cache
+    generate_address(&write_p, reg_tmp,
+                      (uint64_t)thread_data->code_cache->traces);
+
+    // sub reg_tmp, x0, reg_tmp
+    a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, reg_tmp, 0, x0, reg_tmp);
+    write_p++;
+
+    // tbnz reg_tmp, #branch
+    uint32_t *tbnz_adr = write_p++;
+
+    // adr reg_temp, #aibi_slot
+    store_adr = write_p++;
+
+    // push x0, reg_tmp, [reg_tmp]
+    a64_LDP_STP(&write_p, 2, 0, 2, 0, 0, reg_spc, reg_tmp, x0);
+    write_p++;
+
+    // branch:
+    a64_tbnz_helper(tbnz_adr, (uint64_t)write_p, reg_tmp, 63);
+  }
+#endif
+
   if (use_x2) {
+    // pop x2
     a64_pop_reg(x2);
   }
 
+  // br x0
   a64_BR(&write_p, x0);
   write_p++;
 
-  a64_cbz_helper(branch_to_not_found, (uint64_t)write_p, 1, reg_tmp);
+  // go_to_dispatcher:
+  a64_cbz_helper(go_to_dispatcher, (uint64_t)write_p, 1, reg_tmp);
 
+  // mov x1, reg_spc
   a64_logical_reg(&write_p, 1, 1, 0, 0, reg_spc, 0, xzr, x0);
   write_p++;
 
+  // mov x1, #basic_block
   a64_copy_to_reg_64bits(&write_p, x1, basic_block);
 
   if (use_x2) {
+    // pop x2
     a64_pop_reg(x2);
   }
 
+  // b #dispatcher
   a64_b_helper(write_p, (uint64_t)thread_data->dispatcher_addr);
   write_p++;
+
+#if defined(DBM_TRACES) && defined(RAIBI)
+  if (is_trace) {
+    // get address of SPC-TPC slot
+    uint64_t aibi_slot = allocate_aibi_slot(thread_data, &write_p);
+
+    // install adr instruction (adr reg_tmp, #aibi_slot)
+    generate_address(&adr, reg_tmp, aibi_slot);
+
+    // install adr instruction (adr reg_tmp, #aibi_slot)
+    generate_address(&store_adr, reg_tmp, aibi_slot);
+  }
+#endif
 
   *o_write_p = write_p;
 }
@@ -818,8 +963,14 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
       case A64_RET:
         a64_BR_decode_fields(read_address, &Rn);
 
+#if defined(RAIBI) || defined(AIBI)
+        uint32_t const ihlu_size = 33 * A64_INSTRUCTION;
+#else
+        uint32_t const ihlu_size = 22 * A64_INSTRUCTION;
+#endif
+
 #ifdef DBM_INLINE_HASH
-        a64_check_free_space(thread_data, &write_p, &data_p, 88, basic_block);
+        a64_check_free_space(thread_data, &write_p, &data_p, ihlu_size, basic_block);
 #endif
 
         thread_data->code_cache_meta[basic_block].exit_branch_type = uncond_branch_reg;
@@ -840,7 +991,9 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
 
         a64_branch_jump(thread_data, &write_p, basic_block, 0, INSERT_BRANCH);
 #else
-        a64_inline_hash_lookup(thread_data, basic_block, &write_p, read_address, Rn, (inst == A64_BLR), true);
+        bool const link = (inst == A64_BLR);
+        bool const set_meta = true;
+        a64_inline_hash_lookup(thread_data, basic_block, &write_p, read_address, Rn, link, set_meta);
 #endif
         stop = true;
         break;
