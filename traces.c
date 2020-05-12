@@ -234,6 +234,89 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
   *exit_address = NOP_INSTRUCTION;
   __clear_cache((void *)(exit_address - 3), (void *)(exit_address + 1));
 }
+
+#ifdef TRIBI
+void insert_prediction(dbm_thread *thread_data, uintptr_t const target,
+                   int const source_index, uintptr_t const tpc) {
+  dbm_code_cache_meta *bb_meta = &thread_data->code_cache_meta[source_index];
+  enum reg const target_reg = bb_meta->rn;
+  enum reg const reg_tmp = (target_reg == x0) ? x1 : x0;
+  uintptr_t const number_of_targets = bb_meta->branch_condition;
+
+  // address of the next available slot
+  uint32_t *write_p = (uint32_t *)bb_meta->branch_taken_addr;
+
+  uint32_t const sf = 1;
+  if (number_of_targets != 0) {
+    // update cbnz to point to the next target prediction
+    uint32_t *next_prediction = bb_meta->next_prediction;
+    a64_cbnz_helper(next_prediction, (uint64_t)write_p, sf, reg_tmp);
+    __clear_cache((void *)next_prediction, (void *)next_prediction + 1);
+  }
+
+  const uint32_t const *start_addr = (uint32_t *)bb_meta->branch_taken_addr;
+
+  // adrp reg_tmp, #:pg_hi21:target
+  // add  reg_tmp, reg_tmp, #:lo12:target
+  generate_address(&write_p, reg_tmp, (uint64_t)target);
+
+  // sub reg_tmp, reg_tmp, target
+  a64_ADD_SUB_shift_reg(&write_p, sf, 1, 0, 0, target_reg, 0, reg_tmp, reg_tmp);
+  write_p++;
+
+  uint64_t const ihlu_addr = (uint64_t)bb_meta->ihlu_addr;
+
+  // record address of cbnz instruction
+  bb_meta->next_prediction = write_p;
+
+  // cbnz reg_tmp, #ihlu
+  a64_cbnz_helper(write_p, ihlu_addr, sf, reg_tmp);
+  write_p++;
+
+  // pop x0, x1
+  a64_pop_pair_reg(x0, x1);
+
+  // b #tpc + 4
+  a64_b_helper(write_p, (uint64_t)tpc + 4);
+  write_p++;
+
+  // align the insertion of the next prediction address to (next) 16 bytes
+  write_p = (uint32_t *)((((uint64_t)write_p) + 0xF) & ~0xF);
+
+  // address of the next available slot
+  bb_meta->branch_taken_addr = (uintptr_t)write_p;
+
+  // branch_condition is used for number of targets
+  bb_meta->branch_condition += 1;
+
+  __clear_cache((void *)start_addr, (void *)write_p);
+}
+
+uintptr_t set_branch_targets_prediction(dbm_thread *thread_data, uintptr_t const target,
+                           int const source_index, uintptr_t const TPC) {
+  dbm_code_cache_meta *bb_meta = &thread_data->code_cache_meta[source_index];
+
+  // branch_condition is used for number of targets
+  uintptr_t const number_of_targets = bb_meta->branch_condition;
+
+  if (number_of_targets < TRIBI_TARGETS) {
+    insert_prediction(thread_data, target, source_index, TPC);
+  } else {
+    // Bail out: Installing IHLU
+    enum reg const Rn = bb_meta->rn;
+    bool const link = bb_meta->link;
+    uint32_t *tpc = (uint32_t *)bb_meta->exit_branch_addr;
+    uint32_t const *start_tpc = tpc;
+    uint32_t *spc = (uint32_t *)bb_meta->branch_skipped_addr;
+    bool const set_meta = false;
+    a64_inline_hash_lookup(thread_data, source_index, &tpc, spc, Rn, link, set_meta);
+
+    __clear_cache((void *)start_tpc, (void *)tpc);
+  }
+  return TPC;
+}
+#endif
+
 #endif
 
 void install_trace(dbm_thread *thread_data) {
@@ -703,7 +786,18 @@ void trace_dispatcher(uintptr_t target, uintptr_t *next_addr, uint32_t source_in
       bb_meta->branch_cache_status = BRANCH_LINKED;
       break;
     case uncond_branch_reg:
+#ifdef TRIBI
+    {
+      uintptr_t const TPC = lookup_or_scan(thread_data, target, NULL);
+      if (TPC < (uintptr_t)thread_data->code_cache->traces) {
+        *next_addr = TPC;
+      } else {
+        *next_addr = set_branch_targets_prediction(thread_data, target, source_index, TPC);
+      }
+    }
+#else
       *next_addr = lookup_or_scan(thread_data, target, NULL);
+#endif
       return;
       break;
 #endif

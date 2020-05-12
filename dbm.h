@@ -148,6 +148,11 @@ typedef struct {
   uint32_t rn;
   uint32_t free_b;
   ll_entry *linked_from;
+#if defined(DBM_TRACES) && defined(TRIBI)
+  uint32_t *ihlu_addr;
+  uint32_t *next_prediction;
+  bool      link;
+#endif
 } dbm_code_cache_meta;
 
 typedef struct {
