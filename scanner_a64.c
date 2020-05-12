@@ -68,6 +68,10 @@
 
 #define A64_INSTRUCTION 4
 
+void _a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t **o_write_p,
+                            uint32_t *read_address, enum reg rn, bool link, bool set_meta,
+                            bool insert_prediction);
+
 void generate_address(uint32_t **o_write_p, enum reg const reg, uint64_t const label) {
   int64_t const four_GB = 4UL * 1024UL * 1024UL * 1024UL;
   int64_t const one_MB = 1024UL * 1024UL;
@@ -535,10 +539,72 @@ bool a64_scanner_deliver_callbacks(dbm_thread *thread_data, mambo_cb_idx cb_id, 
   return replaced;
 }
 
+// a64_inline_hash_lookup interface
 void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t **o_write_p,
                             uint32_t *read_address, enum reg rn, bool link, bool set_meta) {
+  bool const insert_prediction = false;
+  _a64_inline_hash_lookup(thread_data, basic_block, o_write_p, read_address,
+                            rn, link, set_meta, insert_prediction);
+}
+
+#if defined(DBM_TRACES) && defined(TRIBI)
+void set_tribi_header(dbm_thread *thread_data, int basic_block, uint32_t **o_write_p,
+                             uint32_t *read_address, enum reg rn, bool link) {
+  uint32_t *write_p = *o_write_p;
+  dbm_code_cache_meta *bb_meta = &thread_data->code_cache_meta[basic_block];
+  uint32_t *ihlu;
+
+  // the link information is used when producing a bail out
+  bb_meta->link = link;
+
+  bb_meta->rn = rn;
+
+  // branch_condition is used for number of targets
+  bb_meta->branch_condition = 0;
+
+  // push x0, x1
+  a64_push_pair_reg(x0, x1);
+
+  if (link) {
+    // adrp lr, #:pg_hi21:spc
+    // add  lr, lr, #:lo12:spc + 4
+    uint64_t const LR = (uint64_t)read_address + (1 * A64_INSTRUCTION);
+    generate_address(&write_p, lr, LR);
+    bb_meta->branch_skipped_addr = (uintptr_t)read_address;
+  }
+
+  // address of the next available slot
+  bb_meta->branch_taken_addr = (uintptr_t)write_p;
+
+  // b #ihlu
+  ihlu = write_p;
+  write_p++;
+
+  // leave space for target predictions
+  write_p += (TRIBI_TARGETS * 9);
+
+  // insert the inline hash table lookup
+  bool const insert_prediction = true;
+  bool const set_meta = false;
+  bool const set_link = false;
+  _a64_inline_hash_lookup(thread_data, basic_block, &write_p, read_address,
+                            rn, set_link, set_meta, insert_prediction);
+
+  // ihlu
+  uint64_t const ihlu_addr = (uint64_t)bb_meta->ihlu_addr;
+  a64_b_helper(ihlu, (uint64_t)ihlu_addr);
+
+  *o_write_p = write_p;
+}
+#endif
+
+void _a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t **o_write_p,
+                            uint32_t *read_address, enum reg rn, bool link, bool set_meta,
+                            bool insert_prediction) {
   /*
+   *   if (!insert_prediction) {
    *                       push  x0, x1, [sp, #-16]!
+   *   }
    *                       push  x2, [sp, #-16]!                 ***
    *                       mov   x1, rn                          ***
    *                       adrp  lr, #:pg_hi21:spc               ###
@@ -565,6 +631,13 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
    *                       tbnz  reg_tmp, #63, #branch
    *                       adr   reg_tmp, #aibi_slot
    *                       stp   x0, x1, [reg_tmp]
+   * #endif
+   * #if defined(DBM_TRACES) && defined(TRIBI)
+   *   if (insert_prediction) {
+   *                       adr   reg_tmp, #trace_cache
+   *                       sub   reg_tmp, x0, reg_tmp
+   *                       tbz   reg_tmp, #63, #go_to_dispatcher
+   *   }
    * #endif
    *     branch:           pop   x2, [sp], #16                   ***
    *                       br    x0
@@ -596,8 +669,16 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
     thread_data->code_cache_meta[basic_block].rn = reg_spc;
   }
 
+#if defined(DBM_TRACES) && defined(TRIBI)
+  if (!insert_prediction) {
+#endif
   // push x0, x1
   a64_push_pair_reg(x0, x1);
+#if defined(DBM_TRACES) && defined(TRIBI)
+  } else {
+    thread_data->code_cache_meta[basic_block].ihlu_addr = write_p;
+  }
+#endif
 
   if (use_x2) {
     // push x2
@@ -662,6 +743,7 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
   a64_ADD_SUB_shift_reg(&write_p, 1, 0, 0, 0, reg_tmp, 0x2, x0, x0);
   write_p++;
 
+
   // loop:
   loop = write_p;
 
@@ -711,6 +793,24 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
   }
 #endif
 
+#if defined(DBM_TRACES) && defined(TRIBI)
+  uint32_t * tbz_adr;
+  if (insert_prediction) {
+    // check if the TPC is a basic block or a trace
+
+    // adrp reg_tmp, #hash_table
+    generate_address(&write_p, reg_tmp,
+                    (uint64_t)thread_data->code_cache->traces);
+
+    // sub reg_tmp, reg_tpc, reg_tmp
+    a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, reg_tmp, 0, x0, reg_tmp);
+    write_p++;
+
+    // tbz reg_tmp, #63, #go_to_dispatcher
+    tbz_adr = write_p++;
+  }
+#endif
+
   if (use_x2) {
     // pop x2
     a64_pop_reg(x2);
@@ -722,6 +822,13 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
 
   // go_to_dispatcher:
   a64_cbz_helper(go_to_dispatcher, (uint64_t)write_p, 1, reg_tmp);
+
+#if defined(DBM_TRACES) && defined(TRIBI)
+  if (insert_prediction) {
+    // go_to_dispatcher:
+    a64_tbz_helper(tbz_adr, (uint64_t)write_p, reg_tmp, 63);
+  }
+#endif
 
   // mov x1, reg_spc
   a64_logical_reg(&write_p, 1, 1, 0, 0, reg_spc, 0, xzr, x0);
@@ -975,7 +1082,6 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
 
         thread_data->code_cache_meta[basic_block].exit_branch_type = uncond_branch_reg;
         thread_data->code_cache_meta[basic_block].exit_branch_addr = write_p;
-        thread_data->code_cache_meta[basic_block].rn = Rn;
 
 #ifndef DBM_INLINE_HASH
         a64_branch_save_context(&write_p);
@@ -992,8 +1098,19 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
         a64_branch_jump(thread_data, &write_p, basic_block, 0, INSERT_BRANCH);
 #else
         bool const link = (inst == A64_BLR);
-        bool const set_meta = true;
-        a64_inline_hash_lookup(thread_data, basic_block, &write_p, read_address, Rn, link, set_meta);
+#if defined(DBM_TRACES) && defined(TRIBI)
+        if (type == mambo_bb) {
+#endif
+          bool const set_meta = true;
+          a64_inline_hash_lookup(thread_data, basic_block, &write_p,
+                                 read_address, Rn, link, set_meta);
+#if defined(DBM_TRACES) && defined(TRIBI)
+        } else {
+          set_tribi_header(thread_data, basic_block, &write_p,
+                           read_address, Rn, link);
+        }
+#endif
+
 #endif
         stop = true;
         break;

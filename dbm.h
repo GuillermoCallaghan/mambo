@@ -150,6 +150,11 @@ typedef struct {
   ll_entry *linked_from;
 #ifdef DBM_TRACES
   uint32_t exit_instrucion[2];
+#ifdef TRIBI
+  uint32_t *ihlu_addr;
+  uint32_t *next_prediction;
+  bool      link;
+#endif
 #endif
 } dbm_code_cache_meta;
 
