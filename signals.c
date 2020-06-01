@@ -45,6 +45,7 @@
 
 #define SIGNAL_TRAP_IB (0x94)
 #define SIGNAL_TRAP_DB (0x95)
+#define EXIT (0x100)
 
 #ifdef __arm__
   #define pc_field uc_mcontext.arm_pc
@@ -168,6 +169,20 @@ bool unlink_direct_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fr
     case cbz_a64:
     case tbz_a64:
       offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 12 : 8;
+#ifdef DBM_TRACES
+      if (fragment_id >= CODE_CACHE_SIZE) {
+        offset -= 4;
+        a64_instruction instruction = a64_decode(bb_meta->exit_branch_addr);
+        if (instruction != TRAP_INST_TYPE) {
+          bb_meta->exit_instrucion[0] = *bb_meta->exit_branch_addr;
+
+          instruction = a64_decode(bb_meta->exit_branch_addr + 1);
+          if ((instruction == A64_B_BL) && (instruction != TRAP_INST_TYPE))  {
+            bb_meta->exit_instrucion[1] = *(bb_meta->exit_branch_addr + 1);
+          }
+        }
+      }
+#endif
       break;
 #endif
     default:
@@ -512,6 +527,69 @@ void sigret_dispatcher_call(dbm_thread *thread_data, ucontext_t *cont, uintptr_t
                                 __clear_cache((void *)addr, (void *)addr + 4);
 #endif
 
+#ifdef __aarch64__
+#ifdef DBM_TRACES
+void restore_trace_exit(dbm_thread *current_thread, int fragment_id, void **o_write_p) {
+  uint32_t *write_p = *o_write_p;
+  dbm_code_cache_meta *bb_meta = &current_thread->code_cache_meta[fragment_id];
+  uint32_t *exit_instrucion = bb_meta->exit_instrucion;
+
+  *write_p = exit_instrucion[0];
+  write_p++;
+
+  if ((bb_meta->branch_cache_status & BOTH_LINKED) != 0) {
+    *write_p = exit_instrucion[1];
+  }
+
+  *o_write_p = write_p;
+}
+
+bool is_exit(dbm_thread *current_thread, uintptr_t pc, uint32_t **exit_branch) {
+  bool exit = false;
+  uint32_t *write_p = (uint32_t *)pc;
+
+  for (size_t i = 0; i < 3; i++) {
+    a64_instruction instruction = a64_decode(write_p);
+
+    if (instruction == A64_B_BL) {
+      instruction = a64_decode(write_p + 1);
+      if (instruction == TRAP_INST_TYPE) {
+        uint32_t imm;
+        a64_HVC_decode_fields((write_p + 1), &imm);
+        if (imm == EXIT) {
+          exit = true;
+        }
+      }
+      break;
+    }
+    write_p += i;
+  }
+
+  *exit_branch = write_p;
+  return exit;
+}
+#endif
+
+int get_fragment_id(dbm_thread *current_thread, uintptr_t *pc) {
+#ifdef DBM_TRACES
+  bool const is_trace = ((*pc) > (uintptr_t)current_thread->code_cache->traces);
+
+  uint32_t *exit_branch;
+  if (is_trace && is_exit(current_thread, *pc, &exit_branch)) {
+        uint32_t imm26, op;
+        a64_B_BL_decode_fields(exit_branch, &op, &imm26);
+
+        uint64_t branch_offset = sign_extend64(26, imm26) << 2;
+        uint64_t target = (uint64_t)exit_branch + branch_offset;
+
+        // update the pc to point the target of the direct branch
+        *pc = target;
+  }
+#endif
+  return addr_to_fragment_id(current_thread, *pc);
+}
+#endif
+
 /* If type == indirect && pc >= exit, read the pc and deliver the signal */
 /* If pc < <type specific>, unlink the fragment and resume execution */
 uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
@@ -527,7 +605,11 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
 
   if (global_data.exit_group > 0) {
     if (pc >= cc_start && pc < cc_end) {
-      int fragment_id = addr_to_fragment_id(current_thread, (uintptr_t)pc);
+#ifdef __arm__
+    int fragment_id = addr_to_fragment_id(current_thread, pc);
+#elif __aarch64__
+    int fragment_id = get_fragment_id(current_thread, &pc);
+#endif
       dbm_code_cache_meta *bb_meta = &current_thread->code_cache_meta[fragment_id];
       if (pc >= (uintptr_t)bb_meta->exit_branch_addr) {
         thread_abort(current_thread);
@@ -552,9 +634,12 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
   }
 
   if (pc >= cc_start && pc < cc_end) {
-    int fragment_id = addr_to_fragment_id(current_thread, (uintptr_t)pc);
+#ifdef __arm__
+    int fragment_id = addr_to_fragment_id(current_thread, pc);
+#elif __aarch64__
+    int fragment_id = get_fragment_id(current_thread, &pc);
+#endif
     dbm_code_cache_meta *bb_meta = &current_thread->code_cache_meta[fragment_id];
-
     if (pc >= (uintptr_t)bb_meta->exit_branch_addr) {
       void *write_p;
 
@@ -592,7 +677,15 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
 #ifdef __arm__
           restore_exit(current_thread, fragment_id, &write_p, is_thumb);
 #elif __aarch64__
-          restore_exit(current_thread, fragment_id, &write_p);
+#ifdef DBM_TRACES
+          if (fragment_id >= CODE_CACHE_SIZE) {
+            restore_trace_exit(current_thread, fragment_id, &write_p);
+          } else {
+#endif
+            restore_exit(current_thread, fragment_id, &write_p);
+#ifdef DBM_TRACES
+          }
+#endif
 #endif
           __clear_cache(start_addr, write_p);
 

@@ -148,6 +148,9 @@ typedef struct {
   uint32_t rn;
   uint32_t free_b;
   ll_entry *linked_from;
+#ifdef DBM_TRACES
+  uint32_t exit_instrucion[2];
+#endif
 } dbm_code_cache_meta;
 
 typedef struct {

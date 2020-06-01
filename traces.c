@@ -54,6 +54,9 @@
 #endif
 
 #ifdef DBM_TRACES
+
+#define TRACE_EXIT_STUB (0x100)
+
 uintptr_t get_active_trace_spc(dbm_thread *thread_data) {
   int bb_id = thread_data->active_trace.source_bb;
   return (uintptr_t)thread_data->code_cache_meta[bb_id].source_addr;
@@ -221,17 +224,21 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
   }
   /*
    *     New Exit
-   * +----------------+ Exit 1
-   * | NOP            |
-   * | branch to trace|
-   * | NOP            |
-   * +----------------+
+   * +---------------------+ Exit 1
+   * | branch to trace     |
+   * | HVC TRACE_EXIT_STUB |
+   * | NOP                 |
+   * | NOP                 |
+   * +---------------------+
    */
-  *exit_address = NOP_INSTRUCTION;
-  exit_address++;
   a64_b_helper((uint32_t *)exit_address, tpc);
   exit_address++;
+  a64_HVC(&exit_address, TRACE_EXIT_STUB);
+  exit_address++;
   *exit_address = NOP_INSTRUCTION;
+  exit_address++;
+  *exit_address = NOP_INSTRUCTION;
+  exit_address++;
   __clear_cache((void *)(exit_address - 3), (void *)(exit_address + 1));
 }
 #endif
@@ -293,30 +300,30 @@ void install_trace(dbm_thread *thread_data) {
 #elif __aarch64__
   /*
    *       Trace
-   * +----------------+
-   * | inst           |
-   * | inst           |
-   * | cond branch 1  |
-   * | inst           |
-   * | inst           |
-   * | cond branch 2  |
-   * | branch         |
-   * +----------------+ Exit 1 Aligned to 16 bytes
-   * | BB first inst  | <-exit_stub_addr
-   * | BB second inst | <-exit_stub_addr +4
-   * | branch to BB   | <-exit_stub_addr +8
-   * | NOP            |
-   * +----------------+ Exit 2
-   * | BB first inst  | <-exit_stub_addr
-   * | BB second inst | <-exit_stub_addr +4
-   * | branch to BB   | <-exit_stub_addr +8
-   * | NOP            |
-   * +----------------+
-   * | branch to trace|
-   * | NOP            | An exit to a trace when the offset is not big enough
-   * | NOP            |
-   * | NOP            |
-   * +----------------+
+   * +---------------------+
+   * | inst                |
+   * | inst                |
+   * | cond branch 1       |
+   * | inst                |
+   * | inst                |
+   * | cond branch 2       |
+   * | branch              |
+   * +---------------------+ Exit 1 Aligned to 16 bytes
+   * | BB first inst       | <-exit_stub_addr
+   * | BB second inst      | <-exit_stub_addr +4
+   * | branch to BB        | <-exit_stub_addr +8
+   * | HVC TRACE_EXIT_STUB |
+   * +---------------------+ Exit 2
+   * | BB first inst       | <-exit_stub_addr
+   * | BB second inst      | <-exit_stub_addr +4
+   * | branch to BB        | <-exit_stub_addr +8
+   * | HVC TRACE_EXIT_STUB |
+   * +---------------------+
+   * | branch to trace     | An exit to a trace when the offset is not big enough
+   * | HVC TRACE_EXIT_STUB |
+   * | NOP                 |
+   * | NOP                 |
+   * +---------------------+
    */
   uint32_t *cond_branch;
   uint32_t *exit_stub_addr = thread_data->active_trace.write_p;
@@ -341,23 +348,25 @@ void install_trace(dbm_thread *thread_data) {
         if (safe_to_move_instruction(thread_data->active_trace.exits[i].to + 4)) {
           *exit_stub_addr = *(uint32_t *) (thread_data->active_trace.exits[i].to + 4);
           exit_stub_addr++;
+
         } else {
           *exit_stub_addr = NOP_INSTRUCTION;
           exit_stub_addr++;
+
           target_offset = target_offset - 4;
         }
 
       } else {
         *exit_stub_addr = NOP_INSTRUCTION;
         exit_stub_addr++;
+
         *exit_stub_addr = NOP_INSTRUCTION;
         exit_stub_addr++;
       }
 
       a64_b_helper(exit_stub_addr, thread_data->active_trace.exits[i].to + target_offset);
       exit_stub_addr++;
-      *exit_stub_addr = NOP_INSTRUCTION;
-
+      a64_HVC(&exit_stub_addr, TRACE_EXIT_STUB);
       __clear_cache((void *)(exit_start), (void *)exit_stub_addr + 1);
       offset = ((uint64_t)exit_start - (uint64_t)cond_branch);
     } else {
@@ -367,10 +376,13 @@ void install_trace(dbm_thread *thread_data) {
         offset = ((uint64_t) exit_stub_addr - (uint64_t) cond_branch);
         a64_b_helper(exit_stub_addr, thread_data->active_trace.exits[i].to);
         exit_stub_addr++;
+
+        a64_HVC(&exit_stub_addr, TRACE_EXIT_STUB);
+        exit_stub_addr++;
+
         *exit_stub_addr = NOP_INSTRUCTION;
         exit_stub_addr++;
-        *exit_stub_addr = NOP_INSTRUCTION;
-        exit_stub_addr++;
+
         *exit_stub_addr = NOP_INSTRUCTION;
         __clear_cache((void *)(exit_stub_addr - 2), (void *)exit_stub_addr + 1);
       }
