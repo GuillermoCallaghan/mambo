@@ -43,9 +43,9 @@
 #define self_send_signal_offset        ((uintptr_t)send_self_signal - (uintptr_t)&start_of_dispatcher_s)
 #define syscall_wrapper_svc_offset     ((uintptr_t)syscall_wrapper_svc - (uintptr_t)&start_of_dispatcher_s)
 
-#define SIGNAL_TRAP_IB (0x94)
-#define SIGNAL_TRAP_DB (0x95)
-#define EXIT (0x100)
+#define SIGNAL_TRAP_IB  (0x94)
+#define SIGNAL_TRAP_DB  (0x95)
+#define TRACE_EXIT_STUB (0x100)
 
 #ifdef __arm__
   #define pc_field uc_mcontext.arm_pc
@@ -111,7 +111,7 @@ typedef int (*inst_decoder)(void *);
   #define TRAP_INST_TYPE (A64_HVC)
 #endif
 
-bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
+bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fragment_id) {
   int br_inst_type, trap_inst_type;
   inst_decoder decoder;
   void *write_p = *o_write_p;
@@ -126,7 +126,13 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
     decoder = (inst_decoder)arm_decode;
   }
 #elif __aarch64__
-  br_inst_type = A64_BR;
+  #if defined(DBM_TRACES) && defined(RAIBI)
+    if (fragment_id >= CODE_CACHE_SIZE)
+      br_inst_type = A64_CBZ_CBNZ;
+    else
+  #endif
+      br_inst_type = A64_BR;
+
   decoder = (inst_decoder)a64_decode;
 #endif
   trap_inst_type = TRAP_INST_TYPE;
@@ -141,6 +147,11 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
     return false;
   }
 
+#if defined(__aarch64__) && defined(DBM_TRACES) && defined(RAIBI)
+  if (fragment_id >= CODE_CACHE_SIZE) {
+    bb_meta->exit_instrucion[0] = *(uint32_t *)write_p;
+  }
+#endif
   write_trap(SIGNAL_TRAP_IB);
   *o_write_p = write_p;
   return true;
@@ -261,7 +272,7 @@ void unlink_fragment(int fragment_id, uintptr_t pc) {
 #elif __aarch64__
   if (bb_meta->exit_branch_type == uncond_branch_reg) {
 #endif
-    if (!unlink_indirect_branch(bb_meta, &write_p)) {
+    if (!unlink_indirect_branch(bb_meta, &write_p, fragment_id)) {
       return;
     }
   } else if (bb_meta->branch_cache_status != 0) {
@@ -556,7 +567,7 @@ bool is_exit(dbm_thread *current_thread, uintptr_t pc, uint32_t **exit_branch) {
       if (instruction == TRAP_INST_TYPE) {
         uint32_t imm;
         a64_HVC_decode_fields((write_p + 1), &imm);
-        if (imm == EXIT) {
+        if (imm == TRACE_EXIT_STUB) {
           exit = true;
         }
       }
@@ -658,7 +669,17 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
         a64_HVC_decode_fields((uint32_t *)pc, &imm);
 #endif
         if (imm == SIGNAL_TRAP_IB) {
+#if defined(__aarch64__) && defined(DBM_TRACES) && defined(RAIBI)
+          if (fragment_id >= CODE_CACHE_SIZE) {
+            // restore cbnz instrcution
+            *(uint32_t *)pc = bb_meta->exit_instrucion[0];
+            __clear_cache((void *)pc, (void *)pc + 4);
+          } else {
+#endif
           restore_ihl_inst(pc);
+#if defined(__aarch64__) && defined(DBM_TRACES) && defined(RAIBI)
+          }
+#endif
 
           int rn = current_thread->code_cache_meta[fragment_id].rn;
           uintptr_t target;
