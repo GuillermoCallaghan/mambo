@@ -126,7 +126,7 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int 
     decoder = (inst_decoder)arm_decode;
   }
 #elif __aarch64__
-  #if defined(DBM_TRACES) && defined(RAIBI)
+  #if defined(DBM_TRACES) && (defined(RAIBI) || defined(TRIBI))
     if (fragment_id >= CODE_CACHE_SIZE)
       br_inst_type = A64_CBZ_CBNZ;
     else
@@ -138,7 +138,11 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int 
   trap_inst_type = TRAP_INST_TYPE;
 
   int inst = decoder(write_p);
-  while(inst != br_inst_type && inst != trap_inst_type) {
+  while(inst != br_inst_type && inst != trap_inst_type
+#if defined(__aarch64__) && defined(DBM_TRACES) && defined(TRIBI)
+  && inst != A64_B_BL // TRIBI with no predictions has a direct branch to the ihlu
+#endif
+  ) {
     write_p += inst_size(inst, is_thumb);
     inst = decoder(write_p);
   }
@@ -147,7 +151,7 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int 
     return false;
   }
 
-#if defined(__aarch64__) && defined(DBM_TRACES) && defined(RAIBI)
+#if defined(__aarch64__) && defined(DBM_TRACES) && (defined(RAIBI) || defined(TRIBI))
   if (fragment_id >= CODE_CACHE_SIZE) {
     bb_meta->exit_instrucion[0] = *(uint32_t *)write_p;
   }
@@ -669,7 +673,7 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
         a64_HVC_decode_fields((uint32_t *)pc, &imm);
 #endif
         if (imm == SIGNAL_TRAP_IB) {
-#if defined(__aarch64__) && defined(DBM_TRACES) && defined(RAIBI)
+#if defined(__aarch64__) && defined(DBM_TRACES) && (defined(RAIBI) || defined(TRIBI))
           if (fragment_id >= CODE_CACHE_SIZE) {
             // restore cbnz instrcution
             *(uint32_t *)pc = bb_meta->exit_instrucion[0];
@@ -677,7 +681,7 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
           } else {
 #endif
           restore_ihl_inst(pc);
-#if defined(__aarch64__) && defined(DBM_TRACES) && defined(RAIBI)
+#if defined(__aarch64__) && defined(DBM_TRACES) && (defined(RAIBI) || defined(TRIBI))
           }
 #endif
 
