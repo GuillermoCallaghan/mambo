@@ -132,7 +132,7 @@ uint32_t scan_trace(dbm_thread *thread_data, void *address, cc_type type, int *s
 }
 
 #ifdef __aarch64__
-bool safe_to_move_instruction(uint64_t address) {
+bool is_instruction_position_independent(uint64_t address) {
   int instruction = a64_decode((uint32_t *)address);
   switch(instruction) {
     case A64_B_BL:
@@ -334,11 +334,11 @@ void install_trace(dbm_thread *thread_data) {
       record_cc_link(thread_data, (uintptr_t)cond_branch, thread_data->active_trace.exits[i].to);
 
       uint32_t target_offset = 8;
-      if (safe_to_move_instruction(thread_data->active_trace.exits[i].to)) {
+      if (is_instruction_position_independent(thread_data->active_trace.exits[i].to)) {
         *exit_stub_addr = *(uint32_t *) (thread_data->active_trace.exits[i].to);
         exit_stub_addr++;
 
-        if (safe_to_move_instruction(thread_data->active_trace.exits[i].to + 4)) {
+        if (is_instruction_position_independent(thread_data->active_trace.exits[i].to + 4)) {
           *exit_stub_addr = *(uint32_t *) (thread_data->active_trace.exits[i].to + 4);
           exit_stub_addr++;
         } else {
