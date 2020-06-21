@@ -319,9 +319,6 @@ size_t   scan_a64(dbm_thread *thread_data, uint32_t *read_address, int basic_blo
 int allocate_bb(dbm_thread *thread_data);
 void trace_dispatcher(uintptr_t target, uintptr_t *next_addr, uint32_t source_index, dbm_thread *thread_data);
 void flush_code_cache(dbm_thread *thread_data);
-#ifdef __aarch64__
-void generate_trace_exit(dbm_thread *thread_data, uint32_t **o_write_p, int fragment_id, bool is_taken);
-#endif
 void insert_cond_exit_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int cond);
 void sigret_dispatcher_call(dbm_thread *thread_data, ucontext_t *cont, uintptr_t target);
 
