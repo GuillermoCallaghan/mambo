@@ -149,7 +149,7 @@ bool is_instruction_position_independent(uint64_t address) {
   }
 }
 
-void branch_attributes (uintptr_t inst_addr, uint32_t *mask, int64_t *max) {
+void get_cond_branch_attributes(uintptr_t inst_addr, uint32_t *mask, int64_t *max) {
   int instruction = a64_decode((uint32_t *)inst_addr);
   switch(instruction) {
     case A64_CBZ_CBNZ:
@@ -328,7 +328,7 @@ void install_trace(dbm_thread *thread_data) {
 
     // Align to (next) 16
     exit_stub_addr = (uint32_t *)((((uint64_t)exit_stub_addr) + 0xF) & ~0xF);
-    branch_attributes(thread_data->active_trace.exits[i].from, &mask, &max);
+    get_cond_branch_attributes(thread_data->active_trace.exits[i].from, &mask, &max);
     if (thread_data->active_trace.exits[i].to < (uintptr_t)thread_data->code_cache->traces) {
       uint32_t *exit_start = exit_stub_addr;
       record_cc_link(thread_data, (uintptr_t)cond_branch, thread_data->active_trace.exits[i].to);
