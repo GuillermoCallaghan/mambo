@@ -267,7 +267,7 @@ void install_trace(dbm_thread *thread_data) {
     }
 #endif
     cc_link = cc_link->next;
-    __clear_cache((void *)orig_branch, (void *)orig_branch + 4);
+    __clear_cache((void *)orig_branch, (void *)(orig_branch + 4));
   }
 
   hash_add(&thread_data->entry_address, spc, tpc);
@@ -358,7 +358,7 @@ void install_trace(dbm_thread *thread_data) {
       exit_stub_addr++;
       *exit_stub_addr = NOP_INSTRUCTION;
 
-      __clear_cache((void *)(exit_start), (void *)exit_stub_addr + 1);
+      __clear_cache((void *)(exit_start), (void *)(exit_stub_addr + 1));
       offset = ((uint64_t)exit_start - (uint64_t)cond_branch);
     } else {
       offset = (thread_data->active_trace.exits[i].to - (uint64_t)cond_branch);
@@ -372,13 +372,13 @@ void install_trace(dbm_thread *thread_data) {
         *exit_stub_addr = NOP_INSTRUCTION;
         exit_stub_addr++;
         *exit_stub_addr = NOP_INSTRUCTION;
-        __clear_cache((void *)(exit_stub_addr - 2), (void *)exit_stub_addr + 1);
+        __clear_cache((void *)(exit_stub_addr - 2), (void *)(exit_stub_addr + 1));
       }
     }
 
     assert((offset <= max) && (offset >= -max));
     *cond_branch |= (((offset >> 2) & mask) << 5);
-    __clear_cache((void *) cond_branch - 1, (void *) cond_branch + 1);
+    __clear_cache((void *) (cond_branch - 1), (void *) (cond_branch + 1));
     exit_stub_addr++;
   }
   thread_data->active_trace.write_p = exit_stub_addr;
@@ -386,7 +386,7 @@ void install_trace(dbm_thread *thread_data) {
   uint32_t *write_p = (uint32_t*)thread_data->code_cache_meta[bb_source].tpc;
   write_p++; // Jumps the first instruction (POP X0, X1)
   a64_BRK(&write_p, 0); // BRK trap
-  __clear_cache(write_p, write_p + 1);
+  __clear_cache(write_p, (write_p + 1));
 #endif
 }
 
@@ -442,7 +442,7 @@ void set_up_trace_exit(dbm_thread *thread_data, uint32_t **o_write_p, int fragme
   uintptr_t tpc = active_trace_lookup_or_scan(thread_data, addr) + 4;
   int ret = trace_record_exit(thread_data, (uintptr_t)write_p, tpc);
   assert(ret == 0);
-  __clear_cache(write_p, write_p + 4);
+  __clear_cache(write_p, (write_p + 4));
   write_p++;
 
   *o_write_p = write_p;
@@ -571,7 +571,7 @@ void early_trace_exit(dbm_thread *thread_data, dbm_code_cache_meta* bb_meta,
 #ifdef __aarch64__
   a64_cc_branch(thread_data, (uint32_t *)write_p, tpc + 4);
 #endif
-  __clear_cache(write_p, write_p+4);
+  __clear_cache(write_p, (write_p + 4));
   write_p += 4;
   thread_data->active_trace.write_p = (uint8_t *)write_p;
   install_trace(thread_data);
@@ -777,7 +777,7 @@ void trace_dispatcher(uintptr_t target, uintptr_t *next_addr, uint32_t source_in
   a64_pop_pair_reg(x0, x1);
   a64_b_helper(write_p, *next_addr);
   write_p++;
-  __clear_cache(write_p - 2, write_p);
+  __clear_cache((write_p - 2), write_p);
 
   *next_addr = (uintptr_t)(write_p - 2);
 #endif
