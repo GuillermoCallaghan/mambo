@@ -170,6 +170,11 @@ void get_cond_branch_attributes(uintptr_t inst_addr, uint32_t *mask, int64_t *ma
       while(1);
   }
 }
+
+bool is_offset_within_range(int64_t offset, int64_t range) {
+  return ((offset <= (range - 4)) && (offset >= (- range)));
+}
+
 void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
   uint32_t *exit_address;
   uint32_t sf, op, b5, b40, imm, rt, bit, cond;
@@ -180,8 +185,8 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
   switch(instruction) {
     case A64_CBZ_CBNZ:
       a64_CBZ_CBNZ_decode_fields(orig_branch, &sf, &op, &imm, &rt);
-      // check if new_offset fits
-      if ((new_offset < (ONE_MEGABYTE)) && (new_offset > (- ONE_MEGABYTE))) {
+      // Check if new_offset fits
+      if (is_offset_within_range(new_offset, ONE_MEGABYTE)) {
         a64_cbz_cbnz_helper(orig_branch, op, (uint64_t)tpc, sf, rt);
         return;
       } else {
@@ -190,8 +195,8 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
       break;
     case A64_B_COND:
       a64_B_cond_decode_fields(orig_branch, &imm, &cond);
-      // check if new_offset fits
-      if ((new_offset < (ONE_MEGABYTE)) && (new_offset > (- ONE_MEGABYTE))) {
+      // Check if new_offset fits
+      if (is_offset_within_range(new_offset, ONE_MEGABYTE)) {
         a64_b_cond_helper(orig_branch, (uint64_t)tpc, cond);
         return;
       } else {
@@ -200,8 +205,8 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
       break;
     case A64_TBZ_TBNZ:
       a64_TBZ_TBNZ_decode_fields(orig_branch, &b5, &op, &b40, &imm, &rt);
-      // check if new_offset fits
-      if ((new_offset < (THIRTY_TWO_KB)) && (new_offset > (- THIRTY_TWO_KB))) {
+      // Check if new_offset fits
+      if (is_offset_within_range(new_offset, THIRTY_TWO_KB)) {
         bit = (b5 << 5) | b40;
         a64_tbz_tbnz_helper(orig_branch, op, (uint64_t)tpc, rt, bit);
         return;
@@ -362,8 +367,9 @@ void install_trace(dbm_thread *thread_data) {
       offset = ((uint64_t)exit_start - (uint64_t)cond_branch);
     } else {
       offset = (thread_data->active_trace.exits[i].to - (uint64_t)cond_branch);
+
       //  offset does not fit
-      if (((int64_t) offset > max || (int64_t) offset < -max)) {
+      if ((!is_offset_within_range(offset, max))) {
         offset = ((uint64_t) exit_stub_addr - (uint64_t) cond_branch);
         a64_b_helper(exit_stub_addr, thread_data->active_trace.exits[i].to);
         exit_stub_addr++;
@@ -376,7 +382,7 @@ void install_trace(dbm_thread *thread_data) {
       }
     }
 
-    assert((offset <= max) && (offset >= -max));
+    assert(is_offset_within_range(offset, max));
     *cond_branch |= (((offset >> 2) & mask) << 5);
     __clear_cache((void *) (cond_branch - 1), (void *) (cond_branch + 1));
     exit_stub_addr++;
