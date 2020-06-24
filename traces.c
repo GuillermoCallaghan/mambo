@@ -317,80 +317,59 @@ void install_trace(dbm_thread *thread_data) {
    * | branch to BB   | <-exit_stub_addr +8
    * | NOP            |
    * +----------------+
-   * | branch to trace|
-   * | NOP            | An exit to a trace when the offset is not big enough
+   * | branch to trace| An exit to a trace when the offset is not big enough
    * | NOP            |
-   * | NOP            |
+   * | ---            |
+   * | ---            |
    * +----------------+
    */
-  uint32_t *cond_branch;
+
   uint32_t *exit_stub_addr = thread_data->active_trace.write_p;
-  int64_t max, offset;
-  uint32_t mask;
-
   for (int i = 0; i < thread_data->active_trace.free_exit_rec; i++) {
-    cond_branch = (uint32_t *)thread_data->active_trace.exits[i].from;
+    uint32_t *from  = (uint32_t *)thread_data->active_trace.exits[i].from;
+    uintptr_t const to = thread_data->active_trace.exits[i].to;
+    // Align to (next) 16 bytes
+    exit_stub_addr = (uint32_t *)((((uintptr_t)exit_stub_addr) + 0xF) & ~0xF);
+    uint32_t *exit_start = exit_stub_addr;
 
-    // Align to (next) 16
-    exit_stub_addr = (uint32_t *)((((uint64_t)exit_stub_addr) + 0xF) & ~0xF);
+    int64_t max;
+    uint32_t mask;
     get_cond_branch_attributes(thread_data->active_trace.exits[i].from, &mask, &max);
-    if (thread_data->active_trace.exits[i].to < (uintptr_t)thread_data->code_cache->traces) {
-      uint32_t *exit_start = exit_stub_addr;
-      record_cc_link(thread_data, (uintptr_t)cond_branch, thread_data->active_trace.exits[i].to);
 
-      uint32_t target_offset = 8;
-      if (is_instruction_position_independent(thread_data->active_trace.exits[i].to)) {
-        *exit_stub_addr = *(uint32_t *) (thread_data->active_trace.exits[i].to);
-        exit_stub_addr++;
+    bool const is_basic_block = (to < (uintptr_t)thread_data->code_cache->traces);
+    if (is_basic_block) {
+      record_cc_link(thread_data, (uintptr_t)from, to);
+    }
 
-        if (is_instruction_position_independent(thread_data->active_trace.exits[i].to + 4)) {
-          *exit_stub_addr = *(uint32_t *) (thread_data->active_trace.exits[i].to + 4);
+    int64_t offset = (to - (uintptr_t)from);
+    if (is_basic_block || !is_offset_within_range(offset, max)) {
+      uintptr_t target_offset = 0;
+      for (size_t j = 0; j < 2; j++) {
+        if (is_instruction_position_independent(to + j * 4)) {
+          *exit_stub_addr = *(uint32_t *) (to + j * 4);
           exit_stub_addr++;
+          target_offset += 4;
         } else {
-          *exit_stub_addr = NOP_INSTRUCTION;
-          exit_stub_addr++;
-          target_offset = target_offset - 4;
+          break;
         }
-
-      } else {
-        *exit_stub_addr = NOP_INSTRUCTION;
-        exit_stub_addr++;
-        *exit_stub_addr = NOP_INSTRUCTION;
-        exit_stub_addr++;
       }
 
-      a64_b_helper(exit_stub_addr, thread_data->active_trace.exits[i].to + target_offset);
+      a64_b_helper(exit_stub_addr, (uint64_t)(to + target_offset));
       exit_stub_addr++;
       *exit_stub_addr = NOP_INSTRUCTION;
 
       __clear_cache((void *)(exit_start), (void *)(exit_stub_addr + 1));
-      offset = ((uint64_t)exit_start - (uint64_t)cond_branch);
-    } else {
-      offset = (thread_data->active_trace.exits[i].to - (uint64_t)cond_branch);
-
-      //  offset does not fit
-      if ((!is_offset_within_range(offset, max))) {
-        offset = ((uint64_t) exit_stub_addr - (uint64_t) cond_branch);
-        a64_b_helper(exit_stub_addr, thread_data->active_trace.exits[i].to);
-        exit_stub_addr++;
-        *exit_stub_addr = NOP_INSTRUCTION;
-        exit_stub_addr++;
-        *exit_stub_addr = NOP_INSTRUCTION;
-        exit_stub_addr++;
-        *exit_stub_addr = NOP_INSTRUCTION;
-        __clear_cache((void *)(exit_stub_addr - 2), (void *)(exit_stub_addr + 1));
-      }
+      offset = ((uint64_t)exit_start - (uint64_t)from);
     }
 
     assert(is_offset_within_range(offset, max));
-    *cond_branch |= (((offset >> 2) & mask) << 5);
-    __clear_cache((void *) (cond_branch - 1), (void *) (cond_branch + 1));
+    *from |= (((offset >> 2) & mask) << 5);
+    __clear_cache((void *)from, (void *)(from + 1));
     exit_stub_addr++;
   }
   thread_data->active_trace.write_p = exit_stub_addr;
   thread_data->trace_cache_next = (uint8_t  *)exit_stub_addr;
-  uint32_t *write_p = (uint32_t*)thread_data->code_cache_meta[bb_source].tpc;
-  write_p++; // Jumps the first instruction (POP X0, X1)
+  uint32_t *write_p = (uint32_t*)(thread_data->code_cache_meta[bb_source].tpc + 4);
   a64_BRK(&write_p, 0); // BRK trap
   __clear_cache(write_p, (write_p + 1));
 #endif
