@@ -132,8 +132,8 @@ uint32_t scan_trace(dbm_thread *thread_data, void *address, cc_type type, int *s
 }
 
 #ifdef __aarch64__
-bool is_instruction_position_independent(uint64_t address) {
-  int instruction = a64_decode((uint32_t *)address);
+bool is_instruction_position_independent(uint32_t * address) {
+  int instruction = a64_decode(address);
   switch(instruction) {
     case A64_B_BL:
     case A64_CBZ_CBNZ:
@@ -345,7 +345,7 @@ void install_trace(dbm_thread *thread_data) {
     if (is_basic_block || !is_offset_within_range(offset, max)) {
       uintptr_t target_offset = 0;
       for (size_t j = 0; j < 2; j++) {
-        if (is_instruction_position_independent(to + j * 4)) {
+        if (is_instruction_position_independent((uint32_t *)(to + j * 4))) {
           *exit_stub_addr = *(uint32_t *) (to + j * 4);
           exit_stub_addr++;
           target_offset += 4;
