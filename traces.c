@@ -227,14 +227,14 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
   /*
    *     New Exit
    * +----------------+ Exit 1
-   * | NOP            |
    * | branch to trace|
-   * | NOP            |
+   * | NOP            | // These NOPs are to avoid the core fetching more than
+   * | NOP            | // one branch in the same cycle
    * +----------------+
    */
-  *exit_address = NOP_INSTRUCTION;
-  exit_address++;
   a64_b_helper((uint32_t *)exit_address, tpc);
+  exit_address++;
+  *exit_address = NOP_INSTRUCTION;
   exit_address++;
   *exit_address = NOP_INSTRUCTION;
   __clear_cache((void *)(exit_address - 3), (void *)(exit_address + 1));
