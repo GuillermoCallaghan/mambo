@@ -747,12 +747,8 @@ void trace_dispatcher(uintptr_t target, uintptr_t *next_addr, uint32_t source_in
     case trace_inline_max:
 #elif __aarch64__
     case uncond_branch_reg:
-      thread_data->active_trace.write_p -= 4; // *
 #endif
       install_trace(thread_data);
-#ifdef __aarch64__
-      thread_data->active_trace.write_p += 4; // To compensate for the
-#endif                                        // for the - 4
       break;
   }
 
