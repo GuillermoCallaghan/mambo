@@ -142,6 +142,7 @@ bool is_instruction_position_independent(uint32_t * address) {
     case A64_BR:
     case A64_BLR:
     case A64_RET:
+    case A64_LDR_LIT:
     case A64_ADR: // Includes ADRP
       return false;
     default:
