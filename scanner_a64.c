@@ -604,6 +604,7 @@ size_t scan_a64(dbm_thread *thread_data, uint32_t *read_address,
     data_p = write_p + BASIC_BLOCK_SIZE;
   } else { // mambo_trace
     data_p = (uint32_t *)&thread_data->code_cache->traces + (TRACE_CACHE_SIZE / 4);
+    thread_data->code_cache_meta[basic_block].free_b = 0;
   }
 
   /*

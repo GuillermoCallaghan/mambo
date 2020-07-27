@@ -176,7 +176,7 @@ bool is_offset_within_range(int64_t offset, int64_t range) {
   return ((offset <= (range - 4)) && (offset >= (- range)));
 }
 
-void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
+void patch_trace_branches(dbm_thread *thread_data, uint32_t *orig_branch, uintptr_t tpc) {
   uint32_t *exit_address;
   uint32_t sf, op, b5, b40, imm, rt, bit, cond;
 
@@ -233,6 +233,11 @@ void patch_trace_branches(uint32_t *orig_branch, uintptr_t tpc) {
    * | NOP            | // one branch in the same cycle
    * +----------------+
    */
+
+  // Update metadata of the exit
+  int const fragment_id = addr_to_fragment_id(thread_data, (uintptr_t)exit_address);
+  thread_data->code_cache_meta[fragment_id].branch_taken_addr = tpc;
+
   a64_b_helper((uint32_t *)exit_address, tpc);
   exit_address++;
   *exit_address = NOP_INSTRUCTION;
@@ -267,7 +272,7 @@ void install_trace(dbm_thread *thread_data) {
     }
 #elif __aarch64__
     if (orig_branch >= (uintptr_t)thread_data->code_cache->traces) {
-      patch_trace_branches((uint32_t *)orig_branch, tpc + 4);
+      patch_trace_branches(thread_data, (uint32_t *)orig_branch, tpc + 4);
     } else {
       a64_b_helper((uint32_t *)orig_branch, tpc + 4);
     }
@@ -278,8 +283,8 @@ void install_trace(dbm_thread *thread_data) {
 
   hash_add(&thread_data->entry_address, spc, tpc);
 
-  thread_data->trace_id = thread_data->active_trace.id;
 #ifdef __arm__
+  thread_data->trace_id = thread_data->active_trace.id;
   thread_data->trace_cache_next = thread_data->active_trace.write_p;
 
   // Record the trace exits
@@ -344,6 +349,16 @@ void install_trace(dbm_thread *thread_data) {
 
     int64_t offset = (to - (uintptr_t)from);
     if (is_basic_block || !is_offset_within_range(offset, max)) {
+      // Give the exit a number and set metadata
+      int const exit_id = thread_data->active_trace.id++;
+      thread_data->code_cache_meta[exit_id].tpc = (uintptr_t)exit_start;
+      thread_data->code_cache_meta[exit_id].exit_branch_type = trace_exit;
+      thread_data->code_cache_meta[exit_id].branch_cache_status = BRANCH_LINKED;
+
+      // Record the exit id used in the trace fragment
+      int const fragment_id = thread_data->active_trace.exits[i].fragment_id;
+      thread_data->code_cache_meta[fragment_id].free_b = exit_id;
+
       uintptr_t target_offset = 0;
       for (size_t j = 0; j < 2; j++) {
         if (is_instruction_position_independent((uint32_t *)(to + j * 4))) {
@@ -355,9 +370,14 @@ void install_trace(dbm_thread *thread_data) {
         }
       }
 
-      a64_b_helper(exit_stub_addr, (uint64_t)(to + target_offset));
+      uint64_t const target = (to + target_offset);
+      thread_data->code_cache_meta[exit_id].exit_branch_addr = exit_stub_addr;
+      thread_data->code_cache_meta[exit_id].branch_taken_addr = target; // Code Cache target
+
+      a64_b_helper(exit_stub_addr, target);
       exit_stub_addr++;
       *exit_stub_addr = NOP_INSTRUCTION;
+      exit_stub_addr++;
 
       __clear_cache((void *)(exit_start), (void *)(exit_stub_addr + 1));
       offset = ((uint64_t)exit_start - (uint64_t)from);
@@ -366,8 +386,8 @@ void install_trace(dbm_thread *thread_data) {
     assert(is_offset_within_range(offset, max));
     *from |= (((offset >> 2) & mask) << 5);
     __clear_cache((void *)from, (void *)(from + 1));
-    exit_stub_addr++;
   }
+  thread_data->trace_id = thread_data->active_trace.id;
   thread_data->active_trace.write_p = exit_stub_addr;
   thread_data->trace_cache_next = (uint8_t  *)exit_stub_addr;
   uint32_t *write_p = (uint32_t*)(thread_data->code_cache_meta[bb_source].tpc + 4);
@@ -376,7 +396,12 @@ void install_trace(dbm_thread *thread_data) {
 #endif
 }
 
+#ifdef __arm__
 int trace_record_exit(dbm_thread *thread_data, uintptr_t from, uintptr_t to) {
+#endif // __arm__
+#ifdef __aarch64__
+int trace_record_exit(dbm_thread *thread_data, uintptr_t from, uintptr_t to, int fragment_id) {
+#endif // __arch64__
   int record = thread_data->active_trace.free_exit_rec++;
   if (record >= MAX_TRACE_REC_EXITS) {
     return -1;
@@ -384,6 +409,9 @@ int trace_record_exit(dbm_thread *thread_data, uintptr_t from, uintptr_t to) {
 
   thread_data->active_trace.exits[record].from = from;
   thread_data->active_trace.exits[record].to = to;
+#ifdef __aarch64__
+  thread_data->active_trace.exits[record].fragment_id = fragment_id;
+#endif
 
   return 0;
 }
@@ -426,7 +454,7 @@ void set_up_trace_exit(dbm_thread *thread_data, uint32_t **o_write_p, int fragme
 
   uintptr_t addr = is_taken ? bb_meta->branch_skipped_addr : bb_meta->branch_taken_addr;
   uintptr_t tpc = active_trace_lookup_or_scan(thread_data, addr) + 4;
-  int ret = trace_record_exit(thread_data, (uintptr_t)write_p, tpc);
+  int ret = trace_record_exit(thread_data, (uintptr_t)write_p, tpc, fragment_id);
   assert(ret == 0);
   __clear_cache(write_p, (write_p + 4));
   write_p++;

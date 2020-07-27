@@ -114,6 +114,7 @@ typedef enum {
   cond_imm_a64,
   cbz_a64,
   tbz_a64,
+  trace_exit
 #endif // __aarch64__
 } branch_type;
 
@@ -161,6 +162,9 @@ typedef struct {
 struct trace_exits {
   uintptr_t from;
   uintptr_t to;
+#ifdef __aarch64__
+  int fragment_id;
+#endif
 };
 
 #define MAX_TRACE_REC_EXITS (MAX_TRACE_FRAGMENTS+1)
