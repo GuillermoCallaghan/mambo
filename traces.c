@@ -172,10 +172,6 @@ void get_cond_branch_attributes(uintptr_t inst_addr, uint32_t *mask, int64_t *ma
   }
 }
 
-bool is_offset_within_range(int64_t offset, int64_t range) {
-  return ((offset <= (range - 4)) && (offset >= (- range)));
-}
-
 void patch_trace_branches(dbm_thread *thread_data, uint32_t *orig_branch, uintptr_t tpc) {
   uint32_t *exit_address;
   uint32_t sf, op, b5, b40, imm, rt, bit, cond;
