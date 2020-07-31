@@ -718,7 +718,7 @@ void trace_dispatcher(uintptr_t target, uintptr_t *next_addr, uint32_t source_in
     case cond_imm_a64:
     case tbz_a64:
       set_up_trace_exit(thread_data, &write_p, source_index, is_taken);
-      bb_meta->branch_cache_status = is_taken ? FALLTHROUGH_LINKED : BRANCH_LINKED;
+      bb_meta->branch_cache_status = is_taken ? BRANCH_LINKED : FALLTHROUGH_LINKED;
       break;
     case uncond_imm_a64:
       bb_meta->branch_cache_status = BRANCH_LINKED;
