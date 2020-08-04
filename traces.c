@@ -226,23 +226,23 @@ void patch_trace_branches(dbm_thread *thread_data, uint32_t *orig_branch, uintpt
         while(1);
   }
   /*
-   *     New Exit
-   * +----------------+ Exit 1
-   * | branch to trace|
-   * | NOP            | // These NOPs are to avoid the core fetching more than
-   * | NOP            | // one branch in the same cycle
+   * +----------------+ Exit
+   * | NOP            | These NOPs are here to avoid the core fetching more
+   * | NOP            | than one branch in the same cycle
+   * | branch to trace| Also, to maintain the branch address location in all
+   * | NOP            | the exits stubs
    * +----------------+
    */
+  *exit_address = NOP_INSTRUCTION;
+  exit_address++;
+  *exit_address = NOP_INSTRUCTION;
+  exit_address++;
 
   // Update metadata of the exit
   int const fragment_id = addr_to_fragment_id(thread_data, (uintptr_t)exit_address);
   thread_data->code_cache_meta[fragment_id].branch_taken_addr = tpc;
 
   a64_b_helper((uint32_t *)exit_address, tpc);
-  exit_address++;
-  *exit_address = NOP_INSTRUCTION;
-  exit_address++;
-  *exit_address = NOP_INSTRUCTION;
   __clear_cache((void *)(exit_address - 3), (void *)(exit_address + 1));
 }
 #endif
@@ -303,31 +303,34 @@ void install_trace(dbm_thread *thread_data) {
   __clear_cache(write_p, write_p + 4);
 #elif __aarch64__
   /*
-   *       Trace
-   * +----------------+
-   * | inst           |
-   * | inst           |
-   * | cond branch 1  |
-   * | inst           |
-   * | inst           |
-   * | cond branch 2  |
-   * | branch         |
-   * +----------------+ Exit 1 Aligned to 16 bytes
-   * | BB first inst  | <-exit_stub_addr
-   * | BB second inst | <-exit_stub_addr +4
-   * | branch to BB   | <-exit_stub_addr +8
-   * | NOP            |
-   * +----------------+ Exit 2
-   * | BB first inst  | <-exit_stub_addr
-   * | BB second inst | <-exit_stub_addr +4
-   * | branch to BB   | <-exit_stub_addr +8
-   * | NOP            |
-   * +----------------+
-   * | branch to trace| An exit to a trace when the offset is not big enough
-   * | NOP            |
-   * | ---            |
-   * | ---            |
-   * +----------------+
+   *          Trace
+   *    +----------------+
+   *    | inst           |
+   *    | inst           |
+   *    | cond branch 1  |
+   *    | inst           |
+   *    | inst           |
+   *    | cond branch 2  |
+   *    | inst           |
+   *    | cond branch 3  |
+   *    | branch         |
+   *    |                | / Aligned to 16 bytes
+   *    +----------------+ Exit 1
+   *  1:| BB first inst  | <- exit_stub_addr
+   *    | BB second inst | <- exit_stub_addr + 4
+   *    | branch         | <- exit_stub_addr + 8
+   *    | NOP            |
+   *    +----------------+ Exit 2 (Second instruction not position-independent)
+   *  2:| BB first inst  | <- exit_stub_addr
+   *    | NOP            | <- exit_stub_addr + 4
+   *    | branch         | <- exit_stub_addr + 8
+   *    | NOP            |
+   *    +----------------+ Exit 3 (Both instructions are not position-independent)
+   *  3:| NOP            | <- exit_stub_addr
+   *    | NOP            | <- exit_stub_addr + 4
+   *    | branch         | <- exit_stub_addr + 8
+   *    | NOP            |
+   *    +----------------+
    */
 
   uint32_t *exit_stub_addr = thread_data->active_trace.write_p;
@@ -366,6 +369,10 @@ void install_trace(dbm_thread *thread_data) {
           exit_stub_addr++;
           target_offset += 4;
         } else {
+          for (size_t k = 2; k == j; k--) {
+            *exit_stub_addr = NOP_INSTRUCTION;
+            exit_stub_addr++;
+          }
           break;
         }
       }
