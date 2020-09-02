@@ -52,7 +52,33 @@
 #elif __aarch64__
   #define pc_field uc_mcontext.pc
   #define sp_field uc_mcontext.sp
+#define THIRTY_TWO_KB        32 * 1024
+#define ONE_MEGABYTE         1024 * 1024
 #endif
+
+// CHANGE make a wrapper of insert_cond_exit_branch in the dispatcher and/also traces.c: set_up_trace_exit
+void insert_cond_exit_branch_2(dbm_code_cache_meta *bb_meta, void **o_write_p, int cond, uint64_t target) {
+  void *write_p = *o_write_p;
+  switch(bb_meta->exit_branch_type) {
+    case uncond_imm_a64:
+      a64_b_helper(write_p, target);
+      break;
+    case cond_imm_a64:
+      a64_b_cond_helper(write_p, target, cond);
+      break;
+    case cbz_a64:
+      a64_cbz_cbnz_helper(write_p, cond, target, bb_meta->rn >> 5, bb_meta->rn & 0x1F);
+      break;
+    case tbz_a64:
+      a64_tbz_tbnz_helper(write_p, cond, target, bb_meta->rn & 0x1F, bb_meta->rn >> 5);
+      break;
+    default:
+      fprintf(stderr, "insert_cond_exit_branch(): unknown branch type\n");
+      while(1);
+  }
+  write_p += 4;
+  *o_write_p = write_p;
+}
 
 typedef struct {
   uintptr_t pid;
@@ -161,13 +187,18 @@ bool unlink_direct_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fr
       offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 8 : 4;
       break;
 #elif __aarch64__
+    case trace_exit:
     case uncond_imm_a64:
       offset = 4;
       break;
     case cond_imm_a64:
     case cbz_a64:
     case tbz_a64:
-      offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 12 : 8;
+      if (fragment_id < CODE_CACHE_SIZE) {
+        offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 12 : 8;
+      } else {
+        offset = (bb_meta->branch_cache_status & BOTH_LINKED) ?  8 : 4;
+      }
       break;
 #endif
     default:
@@ -425,7 +456,6 @@ void restore_exit(dbm_thread *thread_data, int fragment_id, void **o_write_p) {
 #endif
     cond = invert_cond(cond);
   }
-  insert_cond_exit_branch(bb_meta, &write_p, cond);
 
   if (bb_meta->branch_cache_status & BRANCH_LINKED) {
     target = bb_meta->branch_taken_addr;
@@ -435,6 +465,70 @@ void restore_exit(dbm_thread *thread_data, int fragment_id, void **o_write_p) {
     target = bb_meta->branch_skipped_addr;
     other_target = bb_meta->branch_taken_addr;
   }
+
+  if (fragment_id >= CODE_CACHE_SIZE) {
+    int64_t range = 0;
+    branch_type const exit_branch = bb_meta->exit_branch_type;
+    switch (exit_branch) {
+      case trace_exit: {
+        uint64_t const exit_target = bb_meta->branch_taken_addr;
+        printf("\n\ttrace_exit Errors are comming :( at %p to 0x%lx\n\n", write_p, exit_target);
+        a64_b_helper(write_p, exit_target);
+        write_p += 4;
+        *o_write_p = write_p;
+        return;
+        break;
+      }
+      case uncond_imm_a64:
+        target = cc_lookup(thread_data, target);
+        assert(target != UINT_MAX);
+        direct_branch(write_p, target, cond);
+        write_p += 4;
+        *o_write_p = write_p;
+        return;
+        break;
+      case cond_imm_a64:
+      case cbz_a64:
+        range = ONE_MEGABYTE;
+        break;
+      case tbz_a64:
+        range = THIRTY_TWO_KB;
+        break;
+      default:
+        fprintf(stderr, "restore_exit(): unknown branch type\n");
+        while(1);
+        break;
+    }
+
+    other_target = cc_lookup(thread_data, other_target);
+    assert(other_target != UINT_MAX);
+
+    int64_t const new_offset = (int64_t)other_target - (int64_t)write_p;
+    bool const it_fits = is_offset_within_range(new_offset, range);
+
+    if (it_fits) {
+      other_target += 4;
+    } else {
+      int const exit_id = bb_meta->free_b;
+      other_target = thread_data->code_cache_meta[exit_id].tpc;
+      uintptr_t new_target = thread_data->code_cache_meta[exit_id].tpc;
+      assert(exit_id >= CODE_CACHE_SIZE && "Exit id cannot be from a basic block");
+    }
+    insert_cond_exit_branch_2(bb_meta, &write_p, cond, other_target);
+
+    if (bb_meta->branch_cache_status & BOTH_LINKED) {
+      target = cc_lookup(thread_data, target);
+      assert(target != UINT_MAX);
+      direct_branch(write_p, target, cond);
+      write_p += 4;
+    }
+
+    *o_write_p = write_p;
+    return;
+  } else {
+    insert_cond_exit_branch(bb_meta, &write_p, cond);
+  }
+
   target = cc_lookup(thread_data, target);
   assert(target != UINT_MAX);
   direct_branch(write_p, target, cond);
@@ -609,6 +703,7 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
               break;
             }
 #elif __aarch64__
+            case trace_exit:
             case uncond_imm_a64:
               is_taken = true;
               break;
