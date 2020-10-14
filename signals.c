@@ -110,7 +110,7 @@ typedef int (*inst_decoder)(void *);
   #define TRAP_INST_TYPE (A64_HVC)
 #endif
 
-bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
+bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fragment_id) {
   int br_inst_type, trap_inst_type;
   inst_decoder decoder;
   void *write_p = *o_write_p;
@@ -131,16 +131,26 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
   trap_inst_type = TRAP_INST_TYPE;
 
   int inst = decoder(write_p);
-  while(inst != br_inst_type && inst != trap_inst_type) {
-    write_p += inst_size(inst, is_thumb);
-    inst = decoder(write_p);
-  }
 
-  if (inst == trap_inst_type) {
-    return false;
-  }
+#if defined(DBM_TRACES) && defined(DBM_RAIBI)
+  if (fragment_id >= CODE_CACHE_SIZE) {
+    for (size_t i = 0; i < 2; i++) {
+#endif
+      while(inst != br_inst_type && inst != trap_inst_type) {
+        write_p += inst_size(inst, is_thumb);
+        inst = decoder(write_p);
+      }
 
-  write_trap(SIGNAL_TRAP_IB);
+      if (inst == trap_inst_type) {
+        return false;
+      }
+
+      inst = A64_INVALID;
+      write_trap(SIGNAL_TRAP_IB);
+#if defined(DBM_TRACES) && defined(DBM_RAIBI)
+    }
+  }
+#endif
   *o_write_p = write_p;
   return true;
 }
@@ -268,7 +278,7 @@ void unlink_fragment(int fragment_id, uintptr_t pc) {
 #elif __aarch64__
   if (bb_meta->exit_branch_type == uncond_branch_reg) {
 #endif
-    if (!unlink_indirect_branch(bb_meta, &write_p)) {
+    if (!unlink_indirect_branch(bb_meta, &write_p, fragment_id)) {
       return;
     }
   } else if (bb_meta->branch_cache_status != 0) {
@@ -559,7 +569,30 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
         a64_HVC_decode_fields((uint32_t *)pc, &imm);
 #endif
         if (imm == SIGNAL_TRAP_IB) {
-          restore_ihl_inst(pc);
+
+#if defined(DBM_TRACES) && defined(DBM_RAIBI)
+          if (fragment_id >= CODE_CACHE_SIZE) {
+
+            uint32_t *inst_addr = bb_meta->exit_branch_addr;
+
+            for (size_t i = 0; i < 2; i++) {
+
+              int inst = a64_decode(inst_addr);
+              while (inst != A64_HVC) {
+                inst_addr++;
+                inst = a64_decode(inst_addr);
+              }
+
+              a64_BR(&inst_addr, x0);
+              __clear_cache((void *)inst_addr, (void *)(inst_addr + 1));
+            }
+
+          } else {
+#endif
+            restore_ihl_inst(pc);
+#if defined(DBM_TRACES) && defined(DBM_RAIBI)
+          }
+#endif
 
           int rn = current_thread->code_cache_meta[fragment_id].rn;
           uintptr_t target;
