@@ -394,9 +394,12 @@ void install_trace(dbm_thread *thread_data) {
   thread_data->trace_id = thread_data->active_trace.id;
   thread_data->active_trace.write_p = exit_stub_addr;
   thread_data->trace_cache_next = (uint8_t  *)exit_stub_addr;
+
+#ifndef DBM_RAIBI
   uint32_t *write_p = (uint32_t*)(thread_data->code_cache_meta[bb_source].tpc + 4);
   a64_BRK(&write_p, 0); // BRK trap
   __clear_cache(write_p, write_p + 1);
+#endif
 #endif
 }
 
