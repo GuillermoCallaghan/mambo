@@ -151,6 +151,13 @@ typedef struct {
   uint32_t free_b;
   ll_entry *linked_from;
   uint8_t saved_exit[MAX_SAVED_EXIT_SZ];
+#if defined(DBM_TRACES) && defined(DBM_TRIBI)
+  uint64_t  ihlu_addr;
+  uint32_t *next_prediction;
+  uint32_t *next_tribi_slot;
+  int       number_of_predictions;
+  bool      link;
+#endif
 } dbm_code_cache_meta;
 
 typedef struct {

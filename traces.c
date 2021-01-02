@@ -242,6 +242,76 @@ void patch_trace_branches(dbm_thread *thread_data, uint32_t *orig_branch, uintpt
   a64_b_helper((uint32_t *)exit_address, tpc);
   __clear_cache((void *)(exit_address - 3), (void *)(exit_address + 1));
 }
+
+#if defined(DBM_TRACES) && defined(DBM_TRIBI)
+void insert_prediction(dbm_thread *thread_data, uintptr_t const target,
+                       int const source_index, uintptr_t const tpc,
+                       uintptr_t number_of_targets) {
+  dbm_code_cache_meta *bb_meta = &thread_data->code_cache_meta[source_index];
+  uint32_t *write_p = bb_meta->next_tribi_slot;
+  uint64_t const start_addr = (uint64_t)write_p;
+  enum reg const target_reg = bb_meta->rn;
+  enum reg const reg_tmp = (target_reg == x0) ? x1 : x0;
+
+  if (number_of_targets > 0) {
+    // link previous prediction to current prediction
+    uint32_t *next_prediction = bb_meta->next_prediction;
+    a64_cbnz_helper(next_prediction, start_addr, 1, reg_tmp);
+    __clear_cache((void *)next_prediction, (void *)(next_prediction + 1));
+  }
+
+  // adrp reg_tmp, #:pg_hi21:target
+  // add  reg_tmp, reg_tmp, #:lo12:target
+  generate_address(&write_p, reg_tmp, (uint64_t)target);
+
+  // sub reg_tmp, reg_tmp, target
+  a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, target_reg, 0, reg_tmp, reg_tmp);
+  write_p++;
+
+  // record address of cbnz instruction
+  bb_meta->next_prediction = write_p;
+
+  // cbnz reg_tmp, #ihlu
+  a64_cbnz_helper(write_p, bb_meta->ihlu_addr, 1, reg_tmp);
+  write_p++;
+
+  a64_pop_pair_reg(x0, x1);
+
+  a64_b_helper(write_p, (uint64_t)tpc + 4);
+  write_p++;
+
+  // align the insertion of the next prediction to next 16 bytes
+  write_p = (uint32_t *)((((uint64_t)write_p) + 0xF) & ~0xF);
+
+  // record next available slot
+  bb_meta->next_tribi_slot = write_p;
+
+  __clear_cache((void *)start_addr, (void *)write_p);
+}
+
+void set_branch_targets_prediction(dbm_thread *thread_data, uintptr_t const target,
+                                   int const source_index, uintptr_t const TPC) {
+  dbm_code_cache_meta *bb_meta = &thread_data->code_cache_meta[source_index];
+
+  uintptr_t const number_of_targets = bb_meta->number_of_predictions;
+  if (number_of_targets < TRIBI_TARGETS) {
+    insert_prediction(thread_data, target, source_index, TPC, number_of_targets);
+    bb_meta->number_of_predictions += 1;
+  } else {
+    // Bail out: Installing hash lookup
+    uint32_t *tpc = (uint32_t *)bb_meta->exit_branch_addr;
+    uint32_t const *start_tpc = tpc;
+    uint32_t *spc = (uint32_t *)bb_meta->branch_skipped_addr;
+    enum reg const Rn = bb_meta->rn;
+    bool const link = bb_meta->link;
+    bool const set_meta = false;
+    a64_inline_hash_lookup(thread_data, source_index, &tpc, spc, Rn, link, set_meta);
+
+    __clear_cache((void *)start_tpc, (void *)tpc);
+  }
+}
+#endif
+
 #endif
 
 void install_trace(dbm_thread *thread_data) {
@@ -722,6 +792,12 @@ void trace_dispatcher(uintptr_t target, uintptr_t *next_addr, uint32_t source_in
       break;
     case uncond_branch_reg:
       *next_addr = lookup_or_scan(thread_data, target, NULL);
+#if defined(DBM_TRACES) && defined(DBM_TRIBI)
+      uintptr_t const TPC = *next_addr;
+      if (TPC >= (uintptr_t)thread_data->code_cache->traces) {
+        set_branch_targets_prediction(thread_data, target, source_index, TPC);
+      }
+#endif
       return;
       break;
 #endif

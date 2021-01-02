@@ -19,7 +19,13 @@ OPTS+=-DLINK_BX_ALT
 OPTS+=-DDBM_INLINE_HASH
 OPTS+=-DDBM_TRACES #-DTB_AS_TRACE_HEAD #-DBLXI_AS_TRACE_HEAD
 #OPTS+=-DCC_HUGETLB -DMETADATA_HUGETLB
-OPTS+=-DDBM_RAIBI
+#OPTS+=-DDBM_RAIBI
+ OPTS+=-DDBM_TRIBI
+
+# The TRIBI and RAIBI optimisation cannot be both enabled at the same time
+ifneq (,$(findstring DDBM_TRIBI,$(OPTS)))
+	OPTS+=-DTRIBI_TARGETS=6
+endif
 
 CFLAGS+=-D_GNU_SOURCE -g -std=gnu99 -O2
 CFLAGS+=-DGIT_VERSION=\"$(shell git describe --abbrev=8 --dirty --always)\"
