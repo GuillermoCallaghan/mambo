@@ -546,9 +546,7 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
    *                       adr   reg_tmp, #aibi_slot
    *                       pop   x0, reg_tmp, [reg_tmp]
    *                       sub   reg_tmp, reg_tmp, x1
-   *                       cbnz  reg_tmp, #ihlu
-   *                       pop   reg_tmp, [sp], #16              ***
-   *                       br    x0
+   *                       cbz   reg_tmp, #branch
    * #endif
    *     ihlu:             adrp  x0, #hash_table
    *                       and   reg_tmp, x1, #hash_mask
@@ -617,6 +615,7 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
   uint32_t *adr;
 
   bool const is_trace = write_p > (uint32_t *)thread_data->code_cache->traces;
+  uint32_t *cbz;
 
   // if it is a trace
   if (is_trace) {
@@ -631,18 +630,8 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
     a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, reg_spc, 0, reg_tmp, reg_tmp);
     write_p++;
 
-    // cbnz reg_tmp, #ihlu
-    uint32_t *cbnz = write_p++;
-
-    if (use_x2) {
-      a64_pop_reg(x2);
-    }
-
-    a64_BR(&write_p, x0);
-    write_p++;
-
-    // ihlu:
-    a64_cbnz_helper(cbnz, (uint64_t)write_p, 1, reg_tmp);
+    // cbz reg_tmp, #branch
+    cbz = write_p++;
   }
 #endif
 
@@ -703,6 +692,9 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
 
     // branch:
     a64_tbnz_helper(tbnz_adr, (uint64_t)write_p, reg_tmp, 63);
+
+    // branch:
+    a64_cbz_helper(cbz, (uint64_t)write_p, 1, reg_tmp);
   }
 #endif
 
