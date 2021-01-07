@@ -559,9 +559,6 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
    *                       cbnz  reg_tmp, #loop
    *                       ldur  x0, [x0, #-8]
    * #if defined(DBM_TRACES) && defined(DBM_RAIBI)
-   *                       adr   reg_tmp, #trace_cache
-   *                       sub   reg_tmp, x0, reg_tmp
-   *                       tbnz  reg_tmp, #63, #branch
    *                       adr   reg_tmp, #aibi_slot
    *                       push  x0, reg_spc, [reg_tmp]
    * #endif
@@ -683,26 +680,12 @@ void a64_inline_hash_lookup(dbm_thread *thread_data, int basic_block, uint32_t *
   uint32_t *store_adr;
 
   if (is_trace) {
-    // adr reg_tmp, #trace_cache
-    generate_address(&write_p, reg_tmp,
-                      (uint64_t)thread_data->code_cache->traces);
-
-    // sub reg_tmp, x0, reg_tmp
-    a64_ADD_SUB_shift_reg(&write_p, 1, 1, 0, 0, reg_tmp, 0, x0, reg_tmp);
-    write_p++;
-
-    // tbnz reg_tmp, #branch
-    uint32_t *tbnz_adr = write_p++;
-
     // adr reg_temp, #aibi_slot
     store_adr = write_p++;
 
     // push x0, reg_spc, [reg_tmp]
     a64_LDP_STP(&write_p, 2, 0, 2, 0, 0, reg_spc, reg_tmp, x0);
     write_p++;
-
-    // branch:
-    a64_tbnz_helper(tbnz_adr, (uint64_t)write_p, reg_tmp, 63);
   }
 #endif
 
