@@ -296,7 +296,6 @@ void set_branch_targets_prediction(dbm_thread *thread_data, uintptr_t const targ
   uintptr_t const number_of_targets = bb_meta->number_of_predictions;
   if (number_of_targets < TRIBI_TARGETS) {
     insert_prediction(thread_data, target, source_index, TPC, number_of_targets);
-    bb_meta->number_of_predictions += 1;
   } else {
     // Bail out: Installing hash lookup
     uint32_t *tpc = (uint32_t *)bb_meta->exit_branch_addr;
@@ -309,6 +308,7 @@ void set_branch_targets_prediction(dbm_thread *thread_data, uintptr_t const targ
 
     __clear_cache((void *)start_tpc, (void *)tpc);
   }
+  bb_meta->number_of_predictions += 1;
 }
 #endif
 
