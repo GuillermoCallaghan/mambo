@@ -53,6 +53,7 @@
   #define pc_field uc_mcontext.pc
   #define sp_field uc_mcontext.sp
   #define NOP_INSTRUCTION 0xD503201F
+  #define BRK_INSTRUCTION 0xD4200000;
 #endif
 
 typedef struct {
@@ -134,6 +135,7 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p,
   if (fragment_id >= CODE_CACHE_SIZE) {
     if ((bb_meta->number_of_predictions > 0) &&
         (bb_meta->number_of_predictions < TRIBI_TARGETS)) {
+      // reset tribi metadata
       bb_meta->number_of_predictions = 0;
       // push x0, x1
       a64_LDP_STP((uint32_t **)&write_p, 2, 0, 3, 0, -2, x1, sp, x0);
@@ -151,10 +153,12 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p,
 
       // Overwrite all tribi predictions
       while ((uint64_t)write_p < bb_meta->ihlu_addr) {
-        *(uint32_t *)write_p = NOP_INSTRUCTION;
-        write_p += 4;
+        *(uint32_t *)write_p = BRK_INSTRUCTION; //NOP_INSTRUCTION;
+        write_p += inst_size(inst, is_thumb);
       }
     }
+    // printf("\tHere: %p\n", *o_write_p);
+    // while(1);
   }
   #endif
 
@@ -286,18 +290,34 @@ void unlink_fragment(int fragment_id, uintptr_t pc) {
   #if defined(DBM_TRACES) && defined(DBM_TRIBI)
   // we don't try to unlink tribi exit branches, we unlink the fragment they jump to
   if ((fragment_id >= CODE_CACHE_SIZE) && (bb_meta->exit_branch_type == uncond_branch_reg)) {
-    a64_instruction instruction = a64_decode((uint32_t *)pc);
-    if (instruction == A64_B_BL) {
-      uint32_t *encoding = (uint32_t *)pc;
+    a64_instruction current_instruction = a64_decode((uint32_t *)pc);
+    a64_instruction next_instruction    = a64_decode((uint32_t *)(pc + 4));
+
+    uint32_t *encoding = (uint32_t *)pc;
+    printf("pc %p\n", encoding);
+    bool const go_to_target = ((current_instruction == A64_LDP_STP) && (next_instruction == A64_B_BL)) ||
+                         (current_instruction == A64_B_BL);
+
+    if (go_to_target) {
+      a64_instruction temp = current_instruction;
+      if (current_instruction == A64_LDP_STP) {
+        // printf("Adding one to encoding %p\n", encoding);
+        encoding++;
+        temp = next_instruction;
+      }
+
       uint64_t imm26 = (*encoding) & 0x3ffffff;
       uint64_t branch_offset = sign_extend64(26, imm26) << 2;
       uint64_t branch_target = (uint64_t)pc + branch_offset;
 
       if ((branch_target != bb_meta->ihlu_addr) &&
           (branch_target != current_thread->dispatcher_addr)) {
+        // printf("Branch target: 0x%lx at %p pc: %p (temp %d)\n", branch_target, encoding, (uint32_t *)pc, temp);
         fragment_id = addr_to_fragment_id(current_thread, branch_target);
         bb_meta = &current_thread->code_cache_meta[fragment_id];
         pc = branch_target;
+      } else {
+        printf("here is on a branch that goes somewhere else %p\n", branch_target);
       }
     }
   }
@@ -315,7 +335,7 @@ void unlink_fragment(int fragment_id, uintptr_t pc) {
   void *start_addr = write_p;
 
 #ifdef __arm__
-  bool const indirect_branch = (bb_meta->exit_branch_type == uncond_reg_thumb ||
+  bool const indirect_branch = (bb_meta->exit_branch_type == uncond_reg_thumb) ||
                                (bb_meta->exit_branch_type == uncond_reg_arm);
 #elif __aarch64__
   bool const indirect_branch = (bb_meta->exit_branch_type == uncond_branch_reg);
